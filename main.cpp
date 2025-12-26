@@ -11,7 +11,7 @@
 using namespace std;
 namespace fs = std::filesystem;
 
-enum struct machineState{START_END, OUTSIDE_PERIMETERS, IN_PERIMETERS, EXIT};
+enum struct machineState{OUTSIDE_PERIMETERS, IN_PERIMETERS, EXIT};
 enum struct GCodeType{G0,G1,G2,G3,NONE};
 
 struct movement{
@@ -21,30 +21,17 @@ struct movement{
   array<float,3> endPos = {0,0,0};
   GCodeType type=GCodeType::NONE; //G0 G1 G2 G3
   array<float,2> IJ = {0,0}; //update only for G2,G3
-  float acceleration = 0.0; //according to M204 Sxxx
+  float acceleration = 100.0; //according to M204 Sxxx
   float fanSpeed = 0.0; //according to M204 Sxxx
-  float speed = 0.0; //according to Fxxx
+  float speed = 100.0; //according to Fxxx
   float extrusionLength = 0.0; //E parameter
 };
 
-machineState processStartEnd(ifstream& file, list<string>& outputGCode);
 machineState processOutsidePerimeters(ifstream& file, list<string>& outputGCode, movement& lastMove);
 machineState processIternalPerimeters(ifstream& file, list<string>& outputGCode, movement& lastMove);
 bool updateMovement(const string& line, movement& m);
 list<string> reverseMovementList(list<movement>& fwdMoves);
-list<string> interpretBwdMovement(movement current, movement previous, movement next);
-
-machineState processStartEnd(ifstream& file, list<string>& outputGCode){
-    string currentLine;
-    
-    while(getline(file,currentLine)){
-        outputGCode.push_back(currentLine);
-        if(currentLine.find("; printing object") == 0){
-            return machineState::OUTSIDE_PERIMETERS;
-        }
-    }
-    return machineState::EXIT;
-}
+list<string> interpretBwdMovement(movement& current, movement& previous, movement& next);
 
 machineState processOutsidePerimeters(ifstream& file, list<string>& outputGCode, movement& lastMove){
     string currentLine;
@@ -52,9 +39,11 @@ machineState processOutsidePerimeters(ifstream& file, list<string>& outputGCode,
     while(getline(file, currentLine)){
         outputGCode.push_back(currentLine);
         updateMovement(currentLine,lastMove);
+        /*
         if(currentLine.find("; stop printing object") == 0){
             return machineState::START_END;
         }
+        */
         if(currentLine==";TYPE:Perimeter"){
             return machineState::IN_PERIMETERS;
         }
@@ -67,6 +56,7 @@ machineState processIternalPerimeters(ifstream& file, list<string>& outputGCode,
     list<movement> perimeterMoves;
     
     perimeterMoves.push_back(lastMove);//add the last known state to the list
+    outputGCode.push_back(";entering perimeters");
     while(getline(file,currentLine)){
         if(updateMovement(currentLine,lastMove)){
             perimeterMoves.push_back(lastMove);
@@ -76,14 +66,16 @@ machineState processIternalPerimeters(ifstream& file, list<string>& outputGCode,
             perimeterMoves.push_back(lastMove);//to ensure all internal states are saved
             outputGCode.splice(outputGCode.end(),reverseMovementList(perimeterMoves));
             outputGCode.push_back(currentLine);
+            outputGCode.push_back(";quitting perimeters");
             return machineState::OUTSIDE_PERIMETERS;
         }
+        
         if(currentLine.find("; stop printing object") == 0){
             lastMove.type=GCodeType::NONE;
             perimeterMoves.push_back(lastMove);//to ensure all internal states are saved
             outputGCode.splice(outputGCode.end(),reverseMovementList(perimeterMoves));
             outputGCode.push_back(currentLine);
-            return machineState::START_END;
+            return machineState::OUTSIDE_PERIMETERS;
         }
     }
     return machineState::EXIT;
@@ -108,7 +100,7 @@ bool updateMovement(const string& line, movement& m) { // return true si dX dY d
         return false;
     }
     
-    if (line.find("M106 S") == 0) {//acceleration
+    if (line.find("M106 S") == 0) {//fanspeed
         m.fanSpeed = stof(line.substr(6));
         return false;
     }
@@ -202,7 +194,7 @@ list<string> reverseMovementList(list<movement>& fwdMoves){
         nextMovement = currentMovement;
         ++it;
     }
-    //3.mouvement de transition vers la position de fin originale forcage de l'accélération et vitesse
+    //3.mouvement de transition vers la position de fin originale + forcage de l'accélération et vitesse
     oss.str(string());
     oss << "G1" << " X " << lastOriginal.endPos[0] << " Y " << lastOriginal.endPos[1]<< " Z " << lastOriginal.endPos[2];
     oss << " F " << (int)lastOriginal.speed;
@@ -213,13 +205,13 @@ list<string> reverseMovementList(list<movement>& fwdMoves){
     return bwdMoves;
 }
 
-list<string> interpretBwdMovement(movement current, movement previous, movement next){
+list<string> interpretBwdMovement(movement& current, movement& previous, movement& next){
     list<string>reversedMovement;
     ostringstream textLine;
     textLine << fixed;
     //;TYPE:Perimeter / Overhang Perimeter
     if(current.overhang!=next.overhang){
-        textLine<<";TYPE:"<<(current.overhang?"Overhang Perimeter":"Perimeter");
+        textLine<<";TYPE:"<<(current.overhang?"Overhang perimeter":"Perimeter");
         reversedMovement.push_back(textLine.str());
         textLine.str(string());
     }
@@ -311,12 +303,11 @@ int main(int argc, char* argv[]) {
 
     list<string> output;
     movement m;
-    machineState state = machineState::START_END;
+    machineState state = machineState::OUTSIDE_PERIMETERS;
 
     // Pocessing
     while (state != machineState::EXIT) {
         switch (state) {
-            case machineState::START_END: state = processStartEnd(file, output); break;
             case machineState::OUTSIDE_PERIMETERS: state = processOutsidePerimeters(file, output, m); break;
             case machineState::IN_PERIMETERS: state = processIternalPerimeters(file, output, m); break;
             default: state = machineState::EXIT; break;
